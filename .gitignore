@@ -56,4 +56,7 @@ images/ioda.qcow2
 
 .vscode/
 images/ioda0.qcow2
-src/iodaFEMU-b13b482/.cache/clangd/*
+src/iodaFEMU/.cache/clangd/*
+
+# 会忽略所有目录下的 compile_commands.json 文件
+**/compile_commands.json
