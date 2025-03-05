@@ -74,7 +74,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
             femu_debug("%s,cid:%d\n", __func__, cmd.cid);
         }
 
-        status = nvme_io_cmd(n, &cmd, req);        // key
+        status = nvme_io_cmd(n, &cmd, req);        // key func
         if (1 && status == NVME_SUCCESS) {
             req->status = status;
 
@@ -309,6 +309,11 @@ void nvme_create_poller(FemuCtrl *n)
     }
 }
 
+/*
+*  该函数负责：Host DRAM 与 SSD DRAM 之间的实际传输
+*  并且，目前看来，似乎 SSD DRAM 的传输地址完全由 lba 决定，似乎是 SSD DRAM 的大小和 SSD 的大小一样大（不可能）
+*  能想到的其中一种可能就是：和主机内存的虚拟化一样，SSD DRAM 也提供了一层和 SSD 空间大小一样的逻辑地址空间抽象
+*/
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
@@ -346,7 +351,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
 
-    ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);       // key func
     if (!ret) {
         return NVME_SUCCESS;
     }

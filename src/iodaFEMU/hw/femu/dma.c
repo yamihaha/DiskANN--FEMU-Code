@@ -20,6 +20,11 @@ void nvme_addr_write(FemuCtrl *n, hwaddr addr, void *buf, int size)
     }
 }
 
+
+/*
+*  用于将 PRP 描述的主机内存地址 -- 映射到 --> SLG 或 IOVector 中
+*  其中，PRP、SLG 都是描述主机内存地址的某种载体（蕴含某种规则）
+*/
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                       uint64_t prp2, uint32_t len, FemuCtrl *n)
 {
@@ -30,7 +35,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
 
     if (!prp1) {
         return NVME_INVALID_FIELD | NVME_DNR;
-    } else if (n->cmbsz && prp1 >= n->ctrl_mem.addr &&
+    } else if (n->cmbsz && prp1 >= n->ctrl_mem.addr &&         // ctrl_mem : 控制器内存，也就是 SSD 中的内存，CMB
                prp1 < n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) {
         cmb = true;
         qsg->nsg = 0;

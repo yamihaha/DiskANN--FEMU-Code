@@ -26,6 +26,9 @@ void free_dram_backend(SsdDramBackend *b)
     }
 }
 
+/*
+*  Host DRAM（addr info : qsg）  <---- DMA ----> SSD DRAM（addr info : lbal）
+*/
 int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write)
 {
     int sg_cur_index = 0;
