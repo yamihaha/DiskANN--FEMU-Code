@@ -1097,7 +1097,7 @@ static uint16_t zns_do_write(FemuCtrl *n, NvmeRequest *req, bool append,
             goto err;
         }
 
-        backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+        backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write,false);
     }
 
     zns_finalize_zoned_write(ns, req, false);
@@ -1168,7 +1168,7 @@ static uint16_t zns_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     data_offset = zns_l2b(ns, slba);
 
-    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write,false);
     return NVME_SUCCESS;
 
 err:
@@ -1221,7 +1221,7 @@ static uint16_t zns_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         goto err;
     }
 
-    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write,false);
     zns_finalize_zoned_write(ns, req, false);
 
     return NVME_SUCCESS;

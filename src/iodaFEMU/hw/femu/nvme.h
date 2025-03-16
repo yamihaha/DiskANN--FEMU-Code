@@ -995,6 +995,9 @@ typedef struct NvmeRequest {
 
     /* position in the priority queue for delay emulation */
     size_t                  pos;
+
+    bool                    special_write;
+    char*                   diskann_orig_buff;
 } NvmeRequest;
 
 typedef struct DMAOff {
@@ -1444,6 +1447,8 @@ int nvme_register_ocssd20(FemuCtrl *n);
 int nvme_register_nossd(FemuCtrl *n);
 int nvme_register_bbssd(FemuCtrl *n);
 int nvme_register_znssd(FemuCtrl *n);
+
+uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
 static inline uint64_t ns_blks(NvmeNamespace *ns, uint8_t lba_idx)
 {

@@ -261,6 +261,20 @@ struct dram {
 #define SSD_NUM (8)
 #define GROUP_SSD_NUM (2)
 
+struct spec_ppas{
+    struct ppa ppa1,ppa2;
+    uint32_t ppa1_offset;
+};
+
+struct diskann_tool{
+    char* orig_data_buf;
+    char* vali_data_buf;
+    struct spec_ppas* spec_maptbl;
+
+    uint32_t buf_size;
+    uint32_t vali_data_sz;
+};
+
 
 struct ssd {
     char *ssdname;
@@ -270,6 +284,8 @@ struct ssd {
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
     struct line_mgmt lm;
+
+    struct diskann_tool diskann;
     
     /*dram_control*/
     struct dram dram;

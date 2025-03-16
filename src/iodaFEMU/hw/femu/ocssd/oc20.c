@@ -749,7 +749,7 @@ static uint16_t oc20_rw(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req, bool vector
 #endif
         aio_sector_list[i] = (((uint64_t *)req->slba)[i] << lbads);
     }
-    backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write);
+    backend_rw(n->mbe, &req->qsg, aio_sector_list, req->is_write,false);
 
     oc20_advance_status(n, ns, cmd, req);
 

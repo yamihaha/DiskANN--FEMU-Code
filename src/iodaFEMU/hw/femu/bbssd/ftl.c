@@ -1,5 +1,7 @@
 #include "ftl.h"
 #include <stdint.h>
+#include "../nvme.h"
+#include "hw/femu/timing-model/timing.h"
 
 //#define FEMU_DEBUG_FTL
 
@@ -46,6 +48,15 @@ static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa
 {
     ftl_assert(lpn < ssd->sp.tt_pgs);
     ssd->maptbl[lpn] = *ppa;
+}
+
+static inline void set_spec_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa1,
+                                            struct ppa *ppa2,int offset)
+{
+    ftl_assert(lpn < ssd->sp.tt_pgs);
+    ssd->diskann.spec_maptbl[lpn].ppa1 = *ppa1;
+    ssd->diskann.spec_maptbl[lpn].ppa2 = *ppa2;
+    ssd->diskann.spec_maptbl[lpn].ppa1_offset = offset;
 }
 
 static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
@@ -388,6 +399,25 @@ static void ssd_init_maptbl(struct ssd *ssd)
     }
 }
 
+static void ssd_init_diskann_t(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct diskann_tool* diskann = &ssd->diskann;
+
+    diskann->buf_size = 8 * 1024 * 1024;
+    uint32_t buf_size = diskann->buf_size;
+
+    diskann->orig_data_buf = g_malloc0(buf_size);
+    diskann->vali_data_buf = g_malloc0(buf_size);
+
+    ssd->diskann.spec_maptbl = g_malloc0(sizeof(struct spec_ppas) * spp->tt_pgs);
+    for (int i = 0; i < spp->tt_pgs; i++) {
+        ssd->diskann.spec_maptbl[i].ppa1.ppa = UNMAPPED_PPA;
+        ssd->diskann.spec_maptbl[i].ppa2.ppa = UNMAPPED_PPA;
+        ssd->diskann.spec_maptbl[i].ppa1_offset = 0;
+    }
+}
+
 static void ssd_init_rmap(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -474,6 +504,9 @@ void ssd_init(FemuCtrl *n)
 
     /* initialize maptbl */
     ssd_init_maptbl(ssd);
+
+    /* initialize diskann_tool*/
+    ssd_init_diskann_t(ssd);
 
     /* initialize rmap */
     ssd_init_rmap(ssd);
@@ -1289,6 +1322,107 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     return maxlat;
 }
 
+void zip_orig_buffer(struct ssd *ssd, NvmeRequest *req){
+    int len = req->nlb;
+    int valid_sz = req->cmd.res2;
+    uint32_t off = 0;
+    struct diskann_tool* diskann = &ssd->diskann;
+    for(int i = 0;i < len;i ++){
+        memcpy(diskann->vali_data_buf + off,diskann->orig_data_buf + i * ssd->sp.secsz,valid_sz);
+        off += valid_sz;
+    }
+
+    diskann->vali_data_sz = off;
+}
+
+static uint64_t ssd_diskann_write(struct ssd *ssd, NvmeRequest *req)
+{
+    uint64_t lba = req->slba;
+    struct ssdparams *spp = &ssd->sp;
+    int len = req->nlb;
+    uint64_t start_lpn = lba / spp->secs_per_pg;
+    uint64_t end_lpn = (lba + len - 1) / spp->secs_per_pg;
+    struct ppa ppa;
+    uint64_t lpn;
+    uint64_t curlat = 0, maxlat = 0;
+    int r;
+    struct ppa ppa_vec[256 * 8];        // 最多支持 8MB
+    int vali_page_cnt;
+    const int PAGE_SZ = 4096;
+    struct FemuCtrl* ctrl = req->ns->ctrl;
+    NvmeNamespace *ns = req->ns;
+    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
+    uint64_t data_offset = lba << data_shift;
+    int valid_sz = req->cmd.res2;
+
+    req->diskann_orig_buff = ssd->diskann.orig_data_buf;
+    nvme_io_cmd(req->sq->ctrl, &req->cmd, req);       // 将应用数据写入原始缓冲区
+
+    zip_orig_buffer(ssd,req);                                 // orig_buf  ->  valid_buf
+
+    vali_page_cnt = (ssd->diskann.vali_data_sz + PAGE_SZ - 1) / PAGE_SZ;
+
+    /* 还是只能将数据拷入逻辑页地址；如果分配物理地址去写，有可能把正常的有效数据进行覆盖 */
+    memcpy(ctrl->mbe->logical_space + data_offset,ssd->diskann.vali_data_buf,vali_page_cnt * PAGE_SZ);
+
+    if (end_lpn >= spp->tt_pgs) {
+        ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
+    }
+
+    while (should_gc_high(ssd)) {
+        /* perform GC here until !should_gc(ssd) */
+        r = do_gc(ssd, true, NULL);
+        if (r == -1)
+            break;
+    }
+
+    /* 分配新物理页并记录 */
+    for(int i = 0;i < vali_page_cnt;i ++){
+        /* new write */
+        ppa = get_new_page(ssd);
+
+        mark_page_valid(ssd, &ppa);
+        ppa_vec[i] = ppa;
+
+        /* need to advance the write pointer here */
+        ssd_advance_write_pointer(ssd);
+
+        struct nand_cmd swr;
+        swr.type = USER_IO;
+        swr.cmd = NAND_WRITE;
+        swr.stime = req->stime;
+        /* get latency statistics */
+        curlat = ssd_advance_status(ssd, &ppa, &swr);
+        maxlat = (curlat > maxlat) ? curlat : maxlat;
+    }
+
+    /* 页映射 */
+    for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        ppa = get_maptbl_ent(ssd, lpn);
+        if (mapped_ppa(&ppa)) {
+            ftl_err("shouldn't be mapped before !");
+        }
+
+        if (ssd->sp.buffer_read)
+        {
+            delete_from_buffer(ssd,lpn);        // ????
+        }
+        
+        int idx = lpn - start_lpn;
+        int s_ppa = (idx * valid_sz) / PAGE_SZ;
+        int off   = (idx * valid_sz) % PAGE_SZ;
+        int e_ppa = ((idx + 1) * valid_sz - 1) / PAGE_SZ;
+
+        set_spec_maptbl_ent(ssd,lpn,&ppa_vec[s_ppa],&ppa_vec[e_ppa],off);
+
+        /* TODO */
+        /* set_spec_rmap_ent() , about GC */
+    }
+
+    return maxlat;
+}
+
 static void *ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
@@ -1324,7 +1458,8 @@ static void *ftl_thread(void *arg)
             ftl_assert(req);
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE:
-                lat = ssd_write(ssd, req);
+                if(req->special_write) lat = ssd_diskann_write(ssd,req);
+                else lat = ssd_write(ssd, req);
                 break;
             case NVME_CMD_READ:
                 lat = ssd_read(ssd, req);

@@ -13,6 +13,6 @@ typedef struct SsdDramBackend {
 int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes);
 void free_dram_backend(SsdDramBackend *);
 
-int backend_rw(SsdDramBackend *, QEMUSGList *, uint64_t *, bool);
+int backend_rw(SsdDramBackend *, QEMUSGList *, uint64_t *, bool, bool);
 
 #endif
