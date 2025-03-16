@@ -1,6 +1,5 @@
 #include "ftl.h"
 #include <stdint.h>
-#include "../nvme.h"
 #include "hw/femu/timing-model/timing.h"
 
 //#define FEMU_DEBUG_FTL
@@ -44,6 +43,17 @@ static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
     return ssd->maptbl[lpn];
 }
 
+static inline struct ppa get_spec_ppa_ent(struct ssd *ssd, uint64_t lpn, int idx)
+{
+    if(idx == 1) return ssd->diskann.spec_maptbl[lpn].ppa1;
+    else return ssd->diskann.spec_maptbl[lpn].ppa2;
+}
+
+static inline struct ppa get_spec_ppa2_ent(struct ssd *ssd, uint64_t lpn)
+{
+    return ssd->diskann.spec_maptbl[lpn].ppa2;
+}
+
 static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
     ftl_assert(lpn < ssd->sp.tt_pgs);
@@ -51,11 +61,12 @@ static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa
 }
 
 static inline void set_spec_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa1,
-                                            struct ppa *ppa2,int offset)
+                                            struct ppa *ppa2,int offset, bool two_ppa)
 {
     ftl_assert(lpn < ssd->sp.tt_pgs);
     ssd->diskann.spec_maptbl[lpn].ppa1 = *ppa1;
-    ssd->diskann.spec_maptbl[lpn].ppa2 = *ppa2;
+    if(two_ppa) ssd->diskann.spec_maptbl[lpn].ppa2 = *ppa2;
+    else ssd->diskann.spec_maptbl[lpn].ppa2.ppa = UNMAPPED_PPA;
     ssd->diskann.spec_maptbl[lpn].ppa1_offset = offset;
 }
 
@@ -405,10 +416,10 @@ static void ssd_init_diskann_t(struct ssd *ssd)
     struct diskann_tool* diskann = &ssd->diskann;
 
     diskann->buf_size = 8 * 1024 * 1024;
-    uint32_t buf_size = diskann->buf_size;
+    // uint32_t buf_size = diskann->buf_size;
 
-    diskann->orig_data_buf = g_malloc0(buf_size);
-    diskann->vali_data_buf = g_malloc0(buf_size);
+    // diskann->orig_data_buf = g_malloc0(buf_size);
+    // diskann->vali_data_buf = g_malloc0(buf_size);
 
     ssd->diskann.spec_maptbl = g_malloc0(sizeof(struct spec_ppas) * spp->tt_pgs);
     for (int i = 0; i < spp->tt_pgs; i++) {
@@ -1098,24 +1109,15 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     ssd->total_reads++;
 
     req->gcrt = 0; //g-gc-remaining time
-#define COME_FLAG  1024
-#define Back_FLAG1   2048
 
-    // // femu_debug("Ftl-req->usrflag:%llu\n",req->nvm_usrflag);
-    // if(req->nvm_usrflag == 1024){
-    //     femu_log("Ftl: req->nvme_usrflag:%llu\n",req->nvm_usrflag);
-    // }
-    // if(req->nvm_usrflag == COME_FLAG){
-    //     req->nvm_usrflag = Back_FLAG1;
-    // }
-    // else {
-    //     req->nvm_usrflag = Back_FLAG2;
-    // }
-#define NVME_NORMAL_REQ (0) //gql-normal request code
-#define NVME_RECON_SIG  (1024) //gql-RECONSITUTE SIGNAL
-#define NVME_FAILED_REQ  (408) //gql-failed request code
-#define NVME_FFAIL_SIG (911)  //gql-启用fast-fail机制
-//取出nvm_usrflag的低32位进行判断
+    #define COME_FLAG  1024
+    #define Back_FLAG1   2048
+    #define NVME_NORMAL_REQ (0) //gql-normal request code
+    #define NVME_RECON_SIG  (1024) //gql-RECONSITUTE SIGNAL
+    #define NVME_FAILED_REQ  (408) //gql-failed request code
+    #define NVME_FFAIL_SIG (911)  //gql-启用fast-fail机制
+
+    //取出nvm_usrflag的低32位进行判断
     if (get_low32(req->nvm_usrflag) == NVME_FFAIL_SIG && ssd->sp.fast_fail) {//g--fast-fail的io路径
         /* fastfail IO path */
         if(ssd->sp.straid_debug){
@@ -1168,16 +1170,12 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         return 0;
     } else {
         ssd->total_read_num++;
-        //ftl_log("normal-io: req->nvme_usrflag-high32:%lu,low32:%lu,\n",get_high32(req->nvm_usrflag),get_low32(req->nvm_usrflag));
         int max_gcrt = 0;
         bool sub_gc = false;
         /* normal IO read path */
         for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
             ppa = get_maptbl_ent(ssd, lpn);
             if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
-                //printf("%s,lpn(%" PRId64 ") not mapped to valid ppa\n", ssd->ssdname, lpn);
-                //printf("Invalid ppa,ch:%d,lun:%d,blk:%d,pl:%d,pg:%d,sec:%d\n",
-                //ppa.g.ch, ppa.g.lun, ppa.g.blk, ppa.g.pl, ppa.g.pg, ppa.g.sec);
                 continue;
             }
 
@@ -1263,6 +1261,191 @@ static uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     }
 }
 
+static uint64_t ssd_diskann_read(struct ssd *ssd, NvmeRequest *req)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t lba = req->slba;
+    int nsecs = req->nlb;
+    struct ppa ppa;
+    uint64_t start_lpn = lba / spp->secs_per_pg;
+    uint64_t end_lpn = (lba + nsecs - 1) / spp->secs_per_pg;
+    uint64_t lpn;
+    uint64_t sublat, maxlat = 0;
+    struct nand_lun *lun;
+    bool in_gc = false; /* indicate whether any subIO met GC */
+    int num_concurrent_gcs = 0;
+    /*gql-add for statistic*/
+
+    /*gql- group_gc + ioda reconstruct mod*/
+    bool busy_miss = false; //gql-请求盘繁忙且无备份
+    bool one_recons = true; //gql- 只有请求盘在GC，其余盘未GC，可以重构该请求
+
+    
+
+    if (end_lpn >= spp->tt_pgs) {
+        ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
+    }
+
+    ssd->total_reads++;
+
+    req->gcrt = 0; //g-gc-remaining time
+    
+    #define COME_FLAG  1024
+    #define Back_FLAG1   2048
+    #define NVME_NORMAL_REQ (0) //gql-normal request code
+    #define NVME_RECON_SIG  (1024) //gql-RECONSITUTE SIGNAL
+    #define NVME_FAILED_REQ  (408) //gql-failed request code
+    #define NVME_FFAIL_SIG (911)  //gql-启用fast-fail机制
+
+    for(int ppa_i = 1;ppa_i <= 2;ppa_i ++){
+        //取出nvm_usrflag的低32位进行判断
+        if (get_low32(req->nvm_usrflag) == NVME_FFAIL_SIG && ssd->sp.fast_fail) {//g--fast-fail的io路径
+            /* fastfail IO path */
+            if(ssd->sp.straid_debug){
+                ftl_log("fast-fail-io: req->nvme_usrflag-high32:%lu,low32:%lu,\n",get_high32(req->nvm_usrflag),get_low32(req->nvm_usrflag));
+            }
+
+            for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+                ppa = get_spec_ppa_ent(ssd, lpn,ppa_i);
+            
+                if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
+                    continue;
+                }
+
+                lun = get_lun(ssd, &ppa);
+                if (req->stime < lun->gc_endtime) {
+                    in_gc = true;
+                    int tgcrt = lun->gc_endtime - req->stime;
+                    if (req->gcrt < tgcrt) {
+                        req->gcrt = tgcrt;
+                    }
+                } else {//g-读请求目标lun未执行gc操作，req->stime >= lun->gc_endtime
+                    /* NoGC under fastfail path */
+                    struct nand_cmd srd;
+                    srd.cmd = NAND_READ;
+                    srd.stime = req->stime;
+                    sublat = ssd_advance_status(ssd, &ppa, &srd);
+                    maxlat = (sublat > maxlat) ? sublat : maxlat;
+                }
+            }
+
+            if (!in_gc) {//g-如果请求定向设备不在gc中，req->gcrt==0，未被填充
+                assert(req->gcrt == 0);
+                ssd->reads_nor++ ;//g-normal completed io
+                return maxlat;
+            }
+            /*请求遇到gc，fail掉- 将 NVME_FAILED_REQ填充到req->nvm_usrflag的低32位*/
+            req->nvm_usrflag = set_low32(req->nvm_usrflag, NVME_FAILED_REQ);
+            if (ssd->sp.straid_debug) {
+                ftl_log("FAILED IO : req->nvme_usrflag-high32:%lu,low32:%lu,\n",get_high32(req->nvm_usrflag),get_low32(req->nvm_usrflag));
+            }
+
+            ssd->reads_block++;// blocked by first time
+
+            //how many ssds are in gc when a filed io ocurs
+            for (int i = 0; i < ssd_id_cnt; i++) {
+                if (req->stime < gc_endtime_array[i]) {
+                    num_concurrent_gcs++;
+                }
+            }
+            ssd->num_reads_blocked_by_gc[num_concurrent_gcs]++;
+
+            return 0;
+        } else {
+            ssd->total_read_num++;
+            int max_gcrt = 0;
+            bool sub_gc = false;
+            /* normal IO read path */
+            for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+                ppa = get_spec_ppa_ent(ssd, lpn,ppa_i);
+
+                if (!mapped_ppa(&ppa) || !valid_ppa(ssd, &ppa)) {
+                    continue;
+                }
+
+                lun = get_lun(ssd, &ppa);
+                //根据定向lun是否在gc，选择用哪种方式来执行本次读请求
+                if (ssd->sp.buffer_read)
+                {
+                    if (req->stime >= lun->gc_endtime) {//g-读请求目标lun未执行gc操作，req->stime >= lun->gc_endtime
+                        sublat = Idle_buffer_read(ssd,ssd,lpn,req);    
+                    } else {
+                        sublat = busy_buffer_read(ssd,ssd,lpn,req);
+                        
+                        if (ssd->sp.grpgc_recon){
+                            if (sublat > NAND_READ_LATENCY){                   
+                                busy_miss = true;
+                            }
+                        }
+                    }
+                    ssd->total_read_pages++;
+
+                    
+                }
+                else {
+                    if (req->stime < lun->gc_endtime) {
+                        sub_gc = true;
+                    }                   
+                    if (req->stime < lun->gc_endtime && max_gcrt < lun->gc_endtime - req->stime) {
+                            max_gcrt = lun->gc_endtime - req->stime;
+                    }
+
+                    struct nand_cmd srd;
+                    srd.type = USER_IO;
+                    srd.cmd = NAND_READ;
+                    srd.stime = req->stime;
+                    sublat = ssd_advance_status(ssd, &ppa, &srd);
+                }
+
+                maxlat = (sublat > maxlat) ? sublat : maxlat;   
+            }
+            if(ssd->sp.grpgc_recon)
+            {
+                int this_ssd_id = ssd->id;
+                for (int i=0; i < ssd_id_cnt; i++)
+                {
+                    if (i == this_ssd_id){
+                        continue;
+                    }
+                    if (req->stime < gc_endtime_array[i]){
+                        one_recons = false;
+                        break;
+                    }
+                }
+            }
+
+            if (ssd->sp.buffer_read && ssd->sp.grpgc_recon && one_recons && busy_miss){
+                /*gql-结合ioda的降低读的方案去fast-fail掉请求，实现重构*/
+                req->nvm_usrflag = set_low32(req->nvm_usrflag, NVME_FAILED_REQ);
+                return 0;
+            }
+            else 
+            {
+                if(sub_gc){//blocked read in normal io path
+                    ssd->block_read_num++;
+                    for (int i = 0; i < ssd_id_cnt; i++) {
+                        if (req->stime < gc_endtime_array[i]) {
+                            num_concurrent_gcs++;
+                        }
+                    }
+                    ssd->num_reads_blocked_by_gc[num_concurrent_gcs]++;
+                }
+
+                if (ssd->sp.fast_fail)
+                {
+                    if (max_gcrt > 0){
+                        ssd->reads_reblk++;//reconstruct read io blocked by gc for the second time
+                    }      
+                    ssd->reads_recon++;  //reconstruct read io finished normally
+                }
+
+
+                return maxlat;
+            }
+        }
+    }
+}
+
 static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 {
     uint64_t lba = req->slba;
@@ -1322,18 +1505,20 @@ static uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     return maxlat;
 }
 
+/*
 void zip_orig_buffer(struct ssd *ssd, NvmeRequest *req){
-    int len = req->nlb;
+    int len = (req->nlb + ssd->sp.secs_per_pg - 1) / ssd->sp.secs_per_pg;
     int valid_sz = req->cmd.res2;
     uint32_t off = 0;
     struct diskann_tool* diskann = &ssd->diskann;
     for(int i = 0;i < len;i ++){
-        memcpy(diskann->vali_data_buf + off,diskann->orig_data_buf + i * ssd->sp.secsz,valid_sz);
+        // memcpy(diskann->vali_data_buf + off,diskann->orig_data_buf + i * ssd->sp.secsz,valid_sz);
         off += valid_sz;
     }
 
     diskann->vali_data_sz = off;
 }
+*/
 
 static uint64_t ssd_diskann_write(struct ssd *ssd, NvmeRequest *req)
 {
@@ -1349,22 +1534,19 @@ static uint64_t ssd_diskann_write(struct ssd *ssd, NvmeRequest *req)
     struct ppa ppa_vec[256 * 8];        // 最多支持 8MB
     int vali_page_cnt;
     const int PAGE_SZ = 4096;
-    struct FemuCtrl* ctrl = req->ns->ctrl;
-    NvmeNamespace *ns = req->ns;
-    const uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
-    const uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
-    uint64_t data_offset = lba << data_shift;
     int valid_sz = req->cmd.res2;
+    bool two_ppa;
 
-    req->diskann_orig_buff = ssd->diskann.orig_data_buf;
-    nvme_io_cmd(req->sq->ctrl, &req->cmd, req);       // 将应用数据写入原始缓冲区
+    // req->diskann_orig_buff = ssd->diskann.orig_data_buf;
+    // nvme_io_cmd(req->sq->ctrl, &req->cmd, req);       // 将应用数据写入原始缓冲区
 
-    zip_orig_buffer(ssd,req);                                 // orig_buf  ->  valid_buf
+    // zip_orig_buffer(ssd,req);                                 // orig_buf  ->  valid_buf
 
+    ssd->diskann.vali_data_sz = (req->nlb / ssd->sp.secs_per_pg) * valid_sz;
     vali_page_cnt = (ssd->diskann.vali_data_sz + PAGE_SZ - 1) / PAGE_SZ;
 
     /* 还是只能将数据拷入逻辑页地址；如果分配物理地址去写，有可能把正常的有效数据进行覆盖 */
-    memcpy(ctrl->mbe->logical_space + data_offset,ssd->diskann.vali_data_buf,vali_page_cnt * PAGE_SZ);
+    // memcpy(ctrl->mbe->logical_space + data_offset,ssd->diskann.vali_data_buf,vali_page_cnt * PAGE_SZ);
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("start_lpn=%"PRIu64",tt_pgs=%d\n", start_lpn, ssd->sp.tt_pgs);
@@ -1414,7 +1596,10 @@ static uint64_t ssd_diskann_write(struct ssd *ssd, NvmeRequest *req)
         int off   = (idx * valid_sz) % PAGE_SZ;
         int e_ppa = ((idx + 1) * valid_sz - 1) / PAGE_SZ;
 
-        set_spec_maptbl_ent(ssd,lpn,&ppa_vec[s_ppa],&ppa_vec[e_ppa],off);
+        if(s_ppa != e_ppa) two_ppa = true;
+        else two_ppa = false;
+
+        set_spec_maptbl_ent(ssd,lpn,&ppa_vec[s_ppa],&ppa_vec[e_ppa],off, two_ppa);
 
         /* TODO */
         /* set_spec_rmap_ent() , about GC */
@@ -1450,10 +1635,19 @@ static void *ftl_thread(void *arg)
                 printf("FEMU: FTL to_ftl dequeue failed\n");
             }
 
-            if(req->cmd.res2 > 0 && req->cmd.res2 < 4096){
+            if(req->cmd.res2 > 0 && req->cmd.res2 <= 4096)
+            {
+                req->special_write = true;
                 femu_log("-----------------added_info: %ld\n",req->cmd.res2);
                 femu_log("-----------------write_size: %d\n",(int)req->nlb * 512);
+            } 
+            else req->special_write = false;
+
+            uint64_t start_lpn = req->slba / ssd->sp.secs_per_pg;
+            if(mapped_ppa(&ssd->diskann.spec_maptbl[start_lpn].ppa1)) {
+                req->special_read = true;
             }
+            else req->special_read = false;
 
             ftl_assert(req);
             switch (req->cmd.opcode) {
@@ -1462,10 +1656,8 @@ static void *ftl_thread(void *arg)
                 else lat = ssd_write(ssd, req);
                 break;
             case NVME_CMD_READ:
-                lat = ssd_read(ssd, req);
-                // if (lat > 1e9) {
-                //     printf("FEMU: Read latency is > 1s, what's going on!\n");
-                // }
+                if(req->special_read) lat = ssd_diskann_read(ssd, req);
+                else lat = ssd_read(ssd, req);
                 break;
             case NVME_CMD_DSM:
                 lat = 0;

@@ -29,18 +29,13 @@ void free_dram_backend(SsdDramBackend *b)
 /*
 *  Host DRAM（addr info : qsg）  <---- DMA ----> SSD PAGE（addr info : lbal）
 */
-int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write, bool diskann_flag)
+int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write)
 {
     int sg_cur_index = 0;
     dma_addr_t sg_cur_byte = 0;
     dma_addr_t cur_addr, cur_len;
     uint64_t mb_oft = lbal[0];
     void *mb = b->logical_space;
-
-    if(diskann_flag) {            // @wbl
-        mb = (void*)mb_oft;       // 设置为 orig_data_buf;      
-        mb_oft = 0;
-    }
 
     DMADirection dir = DMA_DIRECTION_FROM_DEVICE;
 

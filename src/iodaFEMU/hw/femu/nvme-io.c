@@ -1,6 +1,6 @@
 #include "./nvme.h"
 
-uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
+static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
 
 static void nvme_update_sq_eventidx(const NvmeSQueue *sq)
 {
@@ -80,10 +80,7 @@ static void nvme_process_sq_io(void *opaque, int index_poller)
         /* test for normal request will be dealed right*/
         // req->special_write = false;          
 
-        if(req->special_write) 
-            status = 1;
-        else 
-            status = nvme_io_cmd(n, &cmd, req);        // key func
+        status = nvme_io_cmd(n, &cmd, req);        // key func
 
         if (1 && status == NVME_SUCCESS) {
             req->status = status;
@@ -359,9 +356,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     req->status = NVME_SUCCESS;
     req->nlb = nlb;
 
-    if(req->special_write) data_offset = (uint64_t)req->diskann_orig_buff;
-
-    ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write, req->special_write);       // key func
+    ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);       // key func
     if (!ret) {
         return NVME_SUCCESS;
     }
@@ -498,7 +493,7 @@ static uint16_t nvme_write_uncor(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
-uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeNamespace *ns;
     uint32_t nsid = le32_to_cpu(cmd->nsid);

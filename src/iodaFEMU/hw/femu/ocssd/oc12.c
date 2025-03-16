@@ -473,7 +473,7 @@ static uint16_t oc12_read(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
     }
-    backend_rw(n->mbe, &req->qsg, psl, req->is_write, false);
+    backend_rw(n->mbe, &req->qsg, psl, req->is_write);
 
     /* Timing Model */
     oc12_advance_status(n, ns, cmd, req);
@@ -551,7 +551,7 @@ static uint16_t oc12_write(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         err = NVME_INVALID_FIELD | NVME_DNR;
         goto fail_free;
     }
-    backend_rw(n->mbe, &req->qsg, psl, req->is_write,false);
+    backend_rw(n->mbe, &req->qsg, psl, req->is_write);
 
     /* Timing Model */
     oc12_advance_status(n, ns, cmd, req);
