@@ -35,7 +35,7 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
 
     if (!prp1) {
         return NVME_INVALID_FIELD | NVME_DNR;
-    } else if (n->cmbsz && prp1 >= n->ctrl_mem.addr &&         // ctrl_mem : 控制器内存，也就是 SSD 中的内存，CMB
+    } else if (n->cmbsz && prp1 >= n->ctrl_mem.addr &&         // ctrl_mem : 控制器内存，也就是 SSD 中的内存
                prp1 < n->ctrl_mem.addr + int128_get64(n->ctrl_mem.size)) {
         cmb = true;
         qsg->nsg = 0;

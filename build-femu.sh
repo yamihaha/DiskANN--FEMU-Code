@@ -6,6 +6,16 @@
 # Note: Please cd into IODA-SOSP21-AE/ first, and then run "./build-femu.sh"
 #
 
+read -p "Have you used sudo? (y/n): " answer
+
+# 检查用户输入
+if [[ "$answer" == "y" ]]; then
+    echo "Starting the script."
+else
+    echo "Exiting the script."
+    exit 1
+fi
+
 num=${1:-8}
 
 IODA_TOPDIR=$(pwd)

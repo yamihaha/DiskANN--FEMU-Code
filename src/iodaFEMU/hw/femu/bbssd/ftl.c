@@ -1316,6 +1316,11 @@ static void *ftl_thread(void *arg)
                 printf("FEMU: FTL to_ftl dequeue failed\n");
             }
 
+            if(req->cmd.res2 > 0 && req->cmd.res2 < 4096){
+                femu_log("-----------------added_info: %ld\n",req->cmd.res2);
+                femu_log("-----------------write_size: %d\n",(int)req->nlb * 512);
+            }
+
             ftl_assert(req);
             switch (req->cmd.opcode) {
             case NVME_CMD_WRITE:

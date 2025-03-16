@@ -310,9 +310,7 @@ void nvme_create_poller(FemuCtrl *n)
 }
 
 /*
-*  该函数负责：Host DRAM 与 SSD DRAM 之间的实际传输
-*  并且，目前看来，似乎 SSD DRAM 的传输地址完全由 lba 决定，似乎是 SSD DRAM 的大小和 SSD 的大小一样大（不可能）
-*  能想到的其中一种可能就是：和主机内存的虚拟化一样，SSD DRAM 也提供了一层和 SSD 空间大小一样的逻辑地址空间抽象
+*  DMA 直接将主机与物理闪存页（实际是内存）导通，读取位置直接为请求的逻辑闪存页地址
 */
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
 {
@@ -339,7 +337,7 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
     if (err)
         return err;
 
-    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
+    if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {      // key func
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, prp1), 0, ns->id);
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -528,7 +526,7 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return NVME_INVALID_OPCODE | NVME_DNR;
     default:
         if (n->ext_ops.io_cmd) {
-            return n->ext_ops.io_cmd(n, ns, cmd, req);
+            return n->ext_ops.io_cmd(n, ns, cmd, req);          // bb_io_cmd()
         }
 
         femu_err("%s, NVME_INVALID_OPCODE\n", __func__);
