@@ -266,15 +266,22 @@ struct spec_ppas{
     uint32_t ppa1_offset;
 };
 
+struct LpaGroup{
+    uint64_t lpn1,lpn2;
+};
+
 struct diskann_tool{
     char* orig_data_buf;
     char* vali_data_buf;
     struct spec_ppas* spec_maptbl;
 
+    bool   *spec_lpn;
+    bool   *spec_ppa;
+    struct LpaGroup *spec_rmap;
+
     uint32_t buf_size;
     uint32_t vali_data_sz;
 };
-
 
 struct ssd {
     char *ssdname;

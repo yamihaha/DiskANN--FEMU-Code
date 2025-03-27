@@ -68,6 +68,8 @@ static inline void set_spec_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa
     if(two_ppa) ssd->diskann.spec_maptbl[lpn].ppa2 = *ppa2;
     else ssd->diskann.spec_maptbl[lpn].ppa2.ppa = UNMAPPED_PPA;
     ssd->diskann.spec_maptbl[lpn].ppa1_offset = offset;
+
+    ssd->diskann.spec_lpn[lpn] = true;
 }
 
 static uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
@@ -99,6 +101,16 @@ static inline void set_rmap_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
     uint64_t pgidx = ppa2pgidx(ssd, ppa);
 
     ssd->rmap[pgidx] = lpn;
+}
+
+static inline void set_spec_rmap_ent(struct ssd *ssd, uint64_t added_lpn, struct ppa *ppa)
+{
+    uint64_t pgidx = ppa2pgidx(ssd, ppa);
+
+    if(ssd->diskann.spec_rmap[pgidx].lpn1 == INVALID_LPN) ssd->diskann.spec_rmap[pgidx].lpn1 = added_lpn;
+    else ssd->diskann.spec_rmap[pgidx].lpn2 = added_lpn;
+
+    ssd->diskann.spec_ppa[pgidx] = true;
 }
 
 static inline int victim_line_cmp_pri(pqueue_pri_t next, pqueue_pri_t curr)
@@ -421,12 +433,24 @@ static void ssd_init_diskann_t(struct ssd *ssd)
     // diskann->orig_data_buf = g_malloc0(buf_size);
     // diskann->vali_data_buf = g_malloc0(buf_size);
 
+    // init maptable
     ssd->diskann.spec_maptbl = g_malloc0(sizeof(struct spec_ppas) * spp->tt_pgs);
     for (int i = 0; i < spp->tt_pgs; i++) {
         ssd->diskann.spec_maptbl[i].ppa1.ppa = UNMAPPED_PPA;
         ssd->diskann.spec_maptbl[i].ppa2.ppa = UNMAPPED_PPA;
         ssd->diskann.spec_maptbl[i].ppa1_offset = 0;
     }
+
+    // init reverse maptable
+    ssd->diskann.spec_rmap = g_malloc0(sizeof(struct LpaGroup) * spp->tt_pgs);
+    for (int i = 0; i < spp->tt_pgs; i++) {
+        diskann->spec_rmap->lpn1 = INVALID_LPN;
+        diskann->spec_rmap->lpn2 = INVALID_LPN;
+    }
+
+    // init is lpa/ppa unit special
+    diskann->spec_lpn = g_malloc0(sizeof(bool) * spp->tt_pgs);
+    diskann->spec_ppa = g_malloc0(sizeof(bool) * spp->tt_pgs);
 }
 
 static void ssd_init_rmap(struct ssd *ssd)
@@ -812,6 +836,8 @@ static void mark_page_invalid(struct ssd *ssd, struct ppa *ppa)
     bool was_full_line = false;
     struct line *line;
 
+    ssd->diskann.spec_ppa[ppa2pgidx(ssd, ppa)] = false;
+
     /* update corresponding page status */
     pg = get_pg(ssd, ppa);
     ftl_assert(pg->status == PG_VALID);
@@ -904,9 +930,75 @@ static void gc_read_page(struct ssd *ssd, struct ppa *ppa)
     }
 }
 
+static uint64_t gc_spec_write_page(struct ssd *ssd, struct ppa *old_ppa)
+{
+    uint64_t old_pgidx = ppa2pgidx(ssd, old_ppa);
+    struct diskann_tool* diskann = &ssd->diskann;
+
+    struct ppa new_ppa;
+    struct nand_lun *new_lun;
+    uint64_t lpn1 = diskann->spec_rmap[old_pgidx].lpn1;
+    uint64_t lpn2 = diskann->spec_rmap[old_pgidx].lpn2;
+
+    ftl_assert(valid_lpn(ssd, lpn));
+    new_ppa = get_new_page(ssd);
+
+    /* update spec_maptbl */
+    if(ppa2pgidx(ssd, &(diskann->spec_maptbl[lpn1].ppa1)) == old_pgidx){
+        diskann->spec_maptbl[lpn1].ppa1 = new_ppa;
+    }
+    else if(ppa2pgidx(ssd, &(diskann->spec_maptbl[lpn1].ppa2)) == old_pgidx){
+        diskann->spec_maptbl[lpn1].ppa2 = new_ppa;
+    }
+    if(ppa2pgidx(ssd, &(diskann->spec_maptbl[lpn2].ppa1)) == old_pgidx){
+        diskann->spec_maptbl[lpn2].ppa1 = new_ppa;
+    }
+    else if(ppa2pgidx(ssd, &(diskann->spec_maptbl[lpn2].ppa2)) == old_pgidx){
+        diskann->spec_maptbl[lpn2].ppa2 = new_ppa;
+    }
+
+    /* update spec_rmap */
+    uint64_t new_pgidx = ppa2pgidx(ssd, &new_ppa);
+    diskann->spec_rmap[new_pgidx].lpn1 = lpn1;
+    diskann->spec_rmap[new_pgidx].lpn2 = lpn2;
+
+    /* update spec_maptable & spec_rmap*/
+    diskann->spec_ppa[old_pgidx] = false;
+    diskann->spec_ppa[new_pgidx] = true;
+
+    mark_page_valid(ssd, &new_ppa);
+
+    /* need to advance the write pointer here */
+    ssd_advance_write_pointer(ssd);
+
+    if (ssd->sp.enable_gc_delay) {
+        struct nand_cmd gcw;
+        gcw.type = GC_IO;
+        gcw.cmd = NAND_WRITE;
+        gcw.stime = 0;
+        ssd_advance_status(ssd, &new_ppa, &gcw);
+    }
+
+    /* advance per-ch gc_endtime as well */
+#if 0
+    new_ch = get_ch(ssd, &new_ppa);
+    new_ch->gc_endtime = new_ch->next_ch_avail_time;
+#endif
+
+    new_lun = get_lun(ssd, &new_ppa);
+    new_lun->gc_endtime = new_lun->next_lun_avail_time;
+
+    return 0;
+}
+
 /* move valid page data (already in DRAM) from victim line to a new page */
 static uint64_t gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
 {
+    uint64_t pgidx = ppa2pgidx(ssd, old_ppa);
+    if(ssd->diskann.spec_ppa[pgidx] == true){
+        return gc_spec_write_page(ssd, old_ppa);
+    }
+
     struct ppa new_ppa;
     struct nand_lun *new_lun;
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
@@ -1581,9 +1673,35 @@ static uint64_t ssd_diskann_write(struct ssd *ssd, NvmeRequest *req)
 
     /* 页映射 */
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        ppa = get_maptbl_ent(ssd, lpn);
-        if (mapped_ppa(&ppa)) {
-            ftl_err("shouldn't be mapped before !");
+        if(ssd->diskann.spec_lpn[lpn] == true){
+            uint64_t pgidx1 = ppa2pgidx(ssd, &(ssd->diskann.spec_maptbl[lpn].ppa1));
+            uint64_t pgidx2 = ppa2pgidx(ssd, &(ssd->diskann.spec_maptbl[lpn].ppa2));
+
+            if(ssd->diskann.spec_rmap[pgidx1].lpn1 == lpn)
+                ssd->diskann.spec_rmap[pgidx1].lpn1 = INVALID_LPN;
+            if(ssd->diskann.spec_rmap[pgidx1].lpn2 == lpn)
+                ssd->diskann.spec_rmap[pgidx1].lpn2 = INVALID_LPN;
+
+            if(ssd->diskann.spec_rmap[pgidx2].lpn1 == lpn)
+                ssd->diskann.spec_rmap[pgidx2].lpn1 = INVALID_LPN;
+            if(ssd->diskann.spec_rmap[pgidx2].lpn2 == lpn)
+                ssd->diskann.spec_rmap[pgidx2].lpn2 = INVALID_LPN;
+
+            if(ssd->diskann.spec_rmap[pgidx1].lpn1 == INVALID_LPN && ssd->diskann.spec_rmap[pgidx1].lpn2 == INVALID_LPN)
+                mark_page_invalid(ssd, &(ssd->diskann.spec_maptbl[lpn].ppa1));
+            
+            if(ssd->diskann.spec_rmap[pgidx2].lpn1 == INVALID_LPN && ssd->diskann.spec_rmap[pgidx2].lpn2 == INVALID_LPN)
+                mark_page_invalid(ssd, &(ssd->diskann.spec_maptbl[lpn].ppa2));
+
+            ssd->diskann.spec_lpn[lpn] = false;
+        }
+        else{
+            ppa = get_maptbl_ent(ssd, lpn);
+            if (mapped_ppa(&ppa)) {
+                /* update old page information first */
+                mark_page_invalid(ssd, &ppa);
+                set_rmap_ent(ssd, INVALID_LPN, &ppa);
+            }
         }
 
         if (ssd->sp.buffer_read)
@@ -1603,6 +1721,8 @@ static uint64_t ssd_diskann_write(struct ssd *ssd, NvmeRequest *req)
 
         /* TODO */
         /* set_spec_rmap_ent() , about GC */
+        set_spec_rmap_ent(ssd, lpn, &ppa_vec[s_ppa]);
+        if(two_ppa == true) set_spec_rmap_ent(ssd, lpn, &ppa_vec[e_ppa]);
     }
 
     return maxlat;
